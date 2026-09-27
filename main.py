@@ -23,12 +23,26 @@ logger = logging.getLogger("categorizador-produtos")
 # ---------------------------------------------------------------------------
 MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
+def limpar_nome_fiscal(nome: str) -> str:
+    """
+    Remove prefixos fiscais de quantidade e tipo de embalagem comumente
+    impressos em faturas/NFC-e, tais como:
+    '1 MA - ', '0.686 KG - ', '1 FR - ', '1 SH - ', '1 TP - ', '1 PC - '
+    """
+    limpo = re.sub(
+        r"^\s*\d+([.,]\d+)?\s*(MA|SH|TP|FR|PC|KG|UN|LT|CX|PT|GL|FD|BJ|LATA|BARRA|M|G|GR)\s*[-–]\s*",
+        "",
+        nome,
+        flags=re.IGNORECASE
+    )
+    return limpo.strip()
+
 # Padrões determinísticos de alta precisão para itens comuns de supermercado / faturas
 REGRAS_REGEX: Dict[str, str] = {
     "ACOUGUE_E_PEIXARIA": (
         r"\b(picanha|alcatra|contra|maminha|costela|frango|coxa|sobrecoxa|peito de frango|"
-        r"carne|bov|suin|peixe|salmao|tilapia|camarao|linguica|salsicha|bife|acougue|bacon|"
-        r"pernil|mignon|patinho|acem|cupim|bovino|suino|pescado|bacalhau)\b"
+        r"carne|bov|suin|peixe|salmao|tilapia|camarao|linguica|ling\b|salsicha|bife|acougue|bacon|"
+        r"pernil|mignon|patinho|acem|cupim|bovino|suino|pescado|bacalhau|toscana|calabresa)\b"
     ),
     "LATICINIOS_E_OVOS": (
         r"\b(leite|queijo|mussarela|mucarela|parmesao|iogurte|requeijao|manteiga|margarina|"
@@ -40,7 +54,8 @@ REGRAS_REGEX: Dict[str, str] = {
     ),
     "MERCEARIA_SECA": (
         r"\b(arroz|feijao|macarrao|massa|espaguete|oleo|azeite|farinha|acucar|cafe|sal|"
-        r"molho|extrato|enlatado|milho|ervilha|sardinha|atum|lentilha|grao de bico)\b"
+        r"molho|extrato|enlatado|milho|ervilha|sardinha|atum|lentilha|grao de bico|"
+        r"vinagre|mol tom|ext tom|bat pa\b|batata palha|yoki|salsaretti|conserva|maionese|ketchup)\b"
     ),
     "CONGELADOS": (
         r"\b(congelad|cong\b|sorvete|pizza|lasanha|nugget|hamburguer|steak|batata cong|"
@@ -51,9 +66,9 @@ REGRAS_REGEX: Dict[str, str] = {
         r"vinho|vodka|whisky|gin|energetico|red bull|monster|agua|tonica|cha|ice)\b"
     ),
     "LIMPEZA": (
-        r"\b(detergente|desinfetante|sabao em po|sabao barra|amaciante|agua sanitaria|"
+        r"\b(detergente|desinfetante|des lysoform|lysoform|sabao em po|sabao barra|amaciante|agua sanitaria|"
         r"alvejante|cloro|esponja|bombril|ype|veja|limpador|desengordurante|multiuso|"
-        r"vassoura|rodo|saco lixo|lustra|lixivia)\b"
+        r"vassoura|rodo|saco lixo|lustra|lixivia|inseticida)\b"
     ),
     "HIGIENE_E_BELEZA": (
         r"\b(shampoo|shamp\b|condicionador|cond\b|sabonete|sab l\b|sab emb\b|creme dental|"
@@ -73,24 +88,25 @@ REGRAS_REGEX: Dict[str, str] = {
         r"manga|maracuja|kiwi|pessego|goiaba|tangerina|mexerica)\b"
     ),
     "HORTIFRUTI_VERDURAS_E_LEGUMES": (
-        r"\b(alface|tomate|cebola|batata|cenoura|alho|pimentao|chuchu|abobrinha|couve|"
-        r"brocolis|espinafre|repolho|mandioca|aipim|rucula|cheiro verde|hortalica)\b"
+        r"\b(alface|tomate|cebola|cebolinha|batata|cenoura|alho|pimentao|chuchu|abobrinha|couve|"
+        r"brocolis|espinafre|repolho|mandioca|aipim|rucula|cheiro verde|hortalica|"
+        r"coentro|agriao|salsa|salsinha|manjericao|hortela|alecrim|acelga|escarola|chicoria|hidroponic\w*)\b"
     )
 }
 
 CATEGORIAS_DESCRICAO: Dict[str, str] = {
-    "ACOUGUE_E_PEIXARIA": "carnes bovinas, aves, frango, suino, peixes e frutos do mar de acougue",
+    "ACOUGUE_E_PEIXARIA": "carnes bovinas, aves, frango, suino, linguiças, peixes e frutos do mar de acougue",
     "LATICINIOS_E_OVOS": "laticinios, leite, queijos, iogurtes, manteiga e ovos",
     "PADARIA_E_CONFEITARIA": "padaria e confeitaria, paes, bolos, tortas, biscoitos e salgados",
-    "MERCEARIA_SECA": "mercearia seca, graos, arroz, feijao, massas, oleo de cozinha, cafe e acucar",
+    "MERCEARIA_SECA": "mercearia seca, graos, arroz, feijao, massas, molhos, vinagre, cafe e acucar",
     "CONGELADOS": "alimentos congelados, sorvetes, refeicoes prontas, pizzas e lasanhas congeladas",
     "BEBIDAS": "bebidas, refrigerantes, sucos, cervejas, vinhos, destilados e agua mineral",
-    "LIMPEZA": "produtos de limpeza domestica, detergentes, desinfetantes, sabao e amaciante",
+    "LIMPEZA": "produtos de limpeza domestica, detergentes, desinfetantes, sabao, lysoform e amaciante",
     "HIGIENE_E_BELEZA": "higiene pessoal e cosméticos, sabonetes, shampoos, desodorantes e cremes",
     "PET_SHOP": "produtos para animais e pet shop, racao e petiscos para caes e gatos",
     "UTILIDADES_DOMESTICAS": "utilidades domesticas e bazar, utensilios de cozinha, copos, pratos e lampadas",
     "HORTIFRUTI_FRUTAS": "frutas frescas de hortifruti",
-    "HORTIFRUTI_VERDURAS_E_LEGUMES": "verduras, legumes e hortalicas frescas de hortifruti"
+    "HORTIFRUTI_VERDURAS_E_LEGUMES": "verduras, legumes, hortalicas frescas, folhas, ervas, coentro, agriao e temperos de hortifruti"
 }
 
 # ---------------------------------------------------------------------------
@@ -114,10 +130,11 @@ class ModelService:
         logger.info(f"{len(self.category_names)} categorias semânticas indexadas.")
 
     def classify(self, text: str) -> Dict[str, any]:
-        cleaned = text.strip()
-        if not cleaned:
+        raw = text.strip()
+        if not raw:
             return {"categoria": "DESCONHECIDO", "confianca": 0.0}
 
+        cleaned = limpar_nome_fiscal(raw)
         cleaned_lower = cleaned.lower()
 
         # 1. Regra Determinística por Expressões Regulares (Rápido e 100% Preciso)
@@ -164,7 +181,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Microsserviço de Categorização Semântica de Produtos",
     description="Classifica nomes de produtos extraídos de faturas/notas fiscais usando abordagem híbrida (Regras Regex + Sentence-Transformers).",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan
 )
 
