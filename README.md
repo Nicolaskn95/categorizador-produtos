@@ -2,17 +2,6 @@
 
 Microsserviço REST em FastAPI para classificação automática de nomes de produtos de faturas/notas fiscais ruidosos e com abreviações (ex: `SAB L MONANGE DETOX`), utilizando Similaridade de Cosseno com embeddings vetoriais profundos gerados pelo modelo `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`.
 
-### Principais Vantagens da v2:
-- **Ultra leve:** Consome apenas ~400 MB a 600 MB de RAM (roda em máquinas de **1 GB de RAM / $6/mês** no DigitalOcean).
-- **Sem necessidade de arquivos de 7 GB:** Não precisa mais baixar ou manter `cc.pt.300.bin` (o download do modelo é automático e tem menos de 470 MB).
-- **Maior acurácia semântica:** Arquitetura Transformer multilíngue capaz de capturar contexto de palavras compostas e abreviações de supermercado.
-
----
-
-## Requisitos
-- Python 3.9+ ou Docker
-- 1 vCPU e 1 GB de RAM (mínimo)
-
 ---
 
 ## Execução com Docker (Recomendado para Produção / DigitalOcean)
