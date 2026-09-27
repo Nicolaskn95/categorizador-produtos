@@ -1,10 +1,10 @@
-# Categorizador Semântico de Produtos (v2 - MiniLM)
+# Categorizador Semântico de Produtos (MiniLM)
 
 Microsserviço REST em FastAPI para classificação automática de nomes de produtos de faturas/notas fiscais ruidosos e com abreviações (ex: `SAB L MONANGE DETOX`), utilizando Similaridade de Cosseno com embeddings vetoriais profundos gerados pelo modelo `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`.
 
 ---
 
-## Execução com Docker (Recomendado para Produção)
+## Execução com Docker
 
 ```bash
 docker compose up -d --build
