@@ -4,7 +4,7 @@ Microsserviço REST em FastAPI para classificação automática de nomes de prod
 
 ---
 
-## Execução com Docker (Recomendado para Produção / DigitalOcean)
+## Execução com Docker (Recomendado para Produção)
 
 ```bash
 docker compose up -d --build
