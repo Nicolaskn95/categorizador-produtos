@@ -25,12 +25,19 @@ logger = logging.getLogger("categorizador-produtos")
 # ---------------------------------------------------------------------------
 # Dicionário de Normalização e Expansão de Abreviações Fiscais (SEFAZ / NFC-e)
 # ---------------------------------------------------------------------------
+PADRAO_EMBALAGEM = (
+    r"^\s*\d+([.,]\d+)?\s*"
+    r"(MA|SH|TP|FR|PC|KG|UN|LT|CX|PT|GL|FD|BJ|PE|PO|BD|DZ|SC|TB|BL|BR|LATA|BARRA|M|G|GR)"
+    r"\s*[-–—/]\s*"
+)
+
 ABREVIACOES_FISCAIS: Dict[str, str] = {
-    r"\bmac\b": "macarrao",
+    r"\blav r\b": "lava roupas",
+    r"\btixan mac\b": "tixan maciez",
+    r"\btixan\b": "lava roupas tixan",
     r"\bguard\b": "guardanapo",
     r"\babob\b": "abobrinha",
     r"\breq\b": "requeijao",
-    r"\blav r\b": "lava roupas",
     r"\bsard\b": "sardinha",
     r"\bcer\b": "cereal",
     r"\bmaion\b": "maionese",
@@ -38,39 +45,37 @@ ABREVIACOES_FISCAIS: Dict[str, str] = {
     r"\bdes\b": "desinfetante",
     r"\bdet\b": "detergente",
     r"\brefri\b": "refrigerante",
+    r"\brefr\b": "refrigerante",
+    r"\bref\b": "refrigerante",
+    r"\benerg\b": "energetico",
     r"\bsab l\b": "sabonete liquido",
     r"\bsab\b": "sabonete",
     r"\bchoc\b": "chocolate",
+    r"\bch\b": "chocolate",
     r"\bbisc\b": "biscoito",
     r"\bacem\b": "carne acem",
     r"\bmusculo\b": "carne musculo",
     r"\bcost\b": "costela",
     r"\balcat\b": "alcatra",
     r"\bpican\b": "picanha",
+    r"\btemp\b": "tempero",
+    r"\bfar ma\b": "farinha mandioca",
+    r"\bfar\b": "farinha",
+    r"\bmac\b": "macarrao",
 }
 
 def limpar_nome_fiscal(nome: str) -> str:
     """
     Higieniza a descrição do produto de cupom fiscal:
-    1. Remove prefixo fiscal de quantidade/embalagem ('1 MA - ', '0.34 KG - ', '1 PE - ', '1 PO - ')
+    1. Remove prefixo fiscal de quantidade/embalagem ('1 MA - ', '0.34 KG - ', '1 PE - ', '1 PO - ', '1 BR - ')
     2. Remove unidades soltas e medidas tipo '23X22', '500ML', '2L', '1KG'
     3. Normaliza pontuações e expande abreviações fiscais conhecidas
     """
-    # 1. Remove prefixo de quantidade e unidade fiscal
-    texto = re.sub(
-        r"^\s*\d+([.,]\d+)?\s*(MA|SH|TP|FR|PC|KG|UN|LT|CX|PT|GL|FD|BJ|PE|PO|BD|DZ|SC|TB|BL|LATA|BARRA|M|G|GR)\s*[-–—/]\s*",
-        "",
-        nome,
-        flags=re.IGNORECASE
-    )
-    # 2. Remove medidas soltas tipo '23X22', '500ML', '2L', '1KG'
+    texto = re.sub(PADRAO_EMBALAGEM, "", nome, flags=re.IGNORECASE)
     texto = re.sub(r"\b\d+([.,]\d+)?(kg|g|gr|l|ml|un|pc|m|cm|mm|x\d+)\b", " ", texto, flags=re.IGNORECASE)
     texto = re.sub(r"\b\d+x\d+\b", " ", texto, flags=re.IGNORECASE)
-    # 3. Remove barras e traços substituindo por espaço
-    texto = re.sub(r"[/\\_\-]", " ", texto)
-    texto = texto.lower().strip()
+    texto = re.sub(r"[/\\_\-]", " ", texto).lower().strip()
 
-    # 4. Expansão de abreviações fiscais
     for padrao, expansao in ABREVIACOES_FISCAIS.items():
         texto = re.sub(padrao, expansao, texto)
 
@@ -78,26 +83,35 @@ def limpar_nome_fiscal(nome: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Regras Determinísticas de Altíssima Precisão (Expressões Regulares)
-# Prioridade: Categorias específicas com termos compostos (ex: massas com ovos) antes de laticínios
+# Prioridade:
+# 1. BEBIDAS antes de FRUTAS (evita que suco/energético de uva caia em frutas)
+# 2. LIMPEZA antes de MERCEARIA (evita que sabão/tixan maciez vire macarrão)
+# 3. MERCEARIA_SECA antes de ACOUGUE (evita que caldo sazon de carne caia em açougue)
 # ---------------------------------------------------------------------------
 REGRAS_REGEX: Dict[str, str] = {
-    "ACOUGUE_E_PEIXARIA": (
-        r"\b(picanha|alcatra|contra|maminha|costela|frango|coxa|sobrecoxa|peito de frango|"
-        r"carne|bov|suin|peixe|salmao|tilapia|camarao|linguica|ling\b|salsicha|bife|acougue|bacon|"
-        r"pernil|mignon|patinho|acem|musculo|cupim|bovino|suino|pescado|bacalhau|toscana|calabresa|"
-        r"miolo acem|file de frango|charque|carne seca)\b"
-    ),
-    "MERCEARIA_SECA": (
-        r"\b(arroz|feijao|macarrao|mac\b|massa|espaguete|penne|oleo|azeite|farinha|acucar|cafe|sal|"
-        r"molho|extrato|enlatado|milho|ervilha|sardinha|sard\b|atum|lentilha|grao de bico|"
-        r"vinagre|mol tom|ext tom|bat pa\b|batata palha|yoki|salsaretti|conserva|maionese|maion\b|"
-        r"ketchup|canjica|sucrilhos|cereal|cer\b)\b"
+    "BEBIDAS": (
+        r"\b(refrigerante|refr\b|refri\b|ref\b|schweppes|coca|coca-cola|pepsi|guarana|fanta|"
+        r"suco|cerveja|chopp|vinho|vodka|whisky|gin|energetico|energ\b|baly|red bull|monster|"
+        r"agua|tonica|cha|ice|gatorade|h2oh)\b"
     ),
     "LIMPEZA": (
         r"\b(detergente|det\b|desinfetante|des\b|des lysoform|lysoform|sabao em po|sabao barra|"
         r"amaciante|agua sanitaria|alvejante|cloro|esponja|bombril|ype|veja|limpador|desengordurante|"
         r"multiuso|vassoura|rodo|saco lixo|lustra|lixivia|inseticida|guardanapo|guard\b|"
-        r"papel toalha|toalha papel|lava roupas|lav r\b|omo)\b"
+        r"papel toalha|toalha papel|lava roupas|lav r\b|omo|tixan|ariel|comfort|downy|brilhante)\b"
+    ),
+    "MERCEARIA_SECA": (
+        r"\b(arroz|feijao|macarrao|mac\b|massa|espaguete|penne|oleo|azeite|farinha|biju|polvilho|fuba|"
+        r"acucar|cafe|sal|molho|extrato|enlatado|milho|ervilha|sardinha|sard\b|atum|lentilha|grao de bico|"
+        r"vinagre|mol tom|ext tom|bat pa\b|batata palha|yoki|salsaretti|conserva|maionese|maion\b|"
+        r"ketchup|canjica|sucrilhos|cereal|cer\b|caldo|sazon|knorr|maggi|sabor ami|curry|tempero|temp\b|"
+        r"siamar|kitano|colorau|cominho|oregano|chocolate|choc\b|ch\b|garoto|lacta|nestle tal|barra chocolate|bombom)\b"
+    ),
+    "ACOUGUE_E_PEIXARIA": (
+        r"\b(picanha|alcatra|contra|maminha|costela|frango|coxa|sobrecoxa|peito de frango|"
+        r"carne|bov|suin|peixe|salmao|tilapia|camarao|linguica|ling\b|salsicha|bife|acougue|bacon|"
+        r"pernil|mignon|patinho|acem|musculo|cupim|bovino|suino|pescado|bacalhau|toscana|calabresa|"
+        r"miolo acem|file de frango|charque|carne seca)\b"
     ),
     "LATICINIOS_E_OVOS": (
         r"\b(leite|queijo|mussarela|mucarela|parmesao|iogurte|requeijao|req\b|manteiga|margarina|"
@@ -110,10 +124,6 @@ REGRAS_REGEX: Dict[str, str] = {
     "CONGELADOS": (
         r"\b(congelad|cong\b|sorvete|pizza|lasanha|nugget|hamburguer|steak|batata cong|"
         r"polpa de fruta|acai|gelo)\b"
-    ),
-    "BEBIDAS": (
-        r"\b(refrigerante|refr\b|refri\b|coca|coca-cola|pepsi|guarana|fanta|suco|cerveja|chopp|"
-        r"vinho|vodka|whisky|gin|energetico|red bull|monster|agua|tonica|cha|ice)\b"
     ),
     "HIGIENE_E_BELEZA": (
         r"\b(shampoo|shamp\b|condicionador|cond\b|sabonete|sab l\b|sab emb\b|sab\b|creme dental|"
@@ -253,6 +263,8 @@ CORPUS_SUPERMERCADO: List[Tuple[str, str]] = [
     ("guardanapo folha dupla", "LIMPEZA"),
     ("toalha papel fani", "LIMPEZA"),
     ("papel toalha kitchen", "LIMPEZA"),
+    ("lava roupas tixan maciez", "LIMPEZA"),
+    ("tixan maciez", "LIMPEZA"),
     ("lava roupas omo delic coco", "LIMPEZA"),
     ("lav r omo delic coco", "LIMPEZA"),
     ("sabao liquido omo", "LIMPEZA"),
@@ -293,6 +305,15 @@ CORPUS_SUPERMERCADO: List[Tuple[str, str]] = [
     ("oleo de soja liza", "MERCEARIA_SECA"),
     ("azeite de oliva andorinha", "MERCEARIA_SECA"),
     ("farinha de trigo dona benta", "MERCEARIA_SECA"),
+    ("farinha de mandioca deusa biju", "MERCEARIA_SECA"),
+    ("farinha mandioca biju", "MERCEARIA_SECA"),
+    ("far ma deusa biju", "MERCEARIA_SECA"),
+    ("caldo sazon carne", "MERCEARIA_SECA"),
+    ("caldo knorr galinha", "MERCEARIA_SECA"),
+    ("curry siamar", "MERCEARIA_SECA"),
+    ("tempero baiano siamar", "MERCEARIA_SECA"),
+    ("chocolate garoto tablete castanha", "MERCEARIA_SECA"),
+    ("barra de chocolate garoto", "MERCEARIA_SECA"),
     ("acucar refinado uniao", "MERCEARIA_SECA"),
     ("cafe torrado e moido pilao", "MERCEARIA_SECA"),
     ("molho de tomate salsaretti", "MERCEARIA_SECA"),
@@ -303,6 +324,11 @@ CORPUS_SUPERMERCADO: List[Tuple[str, str]] = [
     # BEBIDAS
     ("suco campo largo pessego", "BEBIDAS"),
     ("suco campo largo uva integral", "BEBIDAS"),
+    ("refrigerante schweppes citrus", "BEBIDAS"),
+    ("schweppes citrus pet", "BEBIDAS"),
+    ("ref schweppes cit", "BEBIDAS"),
+    ("energetico baly uva verde", "BEBIDAS"),
+    ("energ baly uva v s a", "BEBIDAS"),
     ("refrigerante coca cola zero", "BEBIDAS"),
     ("refrigerante guaraná antarctica", "BEBIDAS"),
     ("cerveja heineken lata", "BEBIDAS"),
@@ -373,14 +399,11 @@ class ModelService:
         X = [limpar_nome_fiscal(t) for t in X_raw]
         y = [item[1] for item in CORPUS_SUPERMERCADO]
 
-        # Extração de características híbrida (palavras inteiras + fragmentos/subpalavras de caracteres)
-        # char_wb (3,5) garante que abreviações fiscais como 'ABOB', 'GUARD', 'MAC' deem match imediato
         vectorizer = FeatureUnion([
             ("word", TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, analyzer="word")),
             ("char", TfidfVectorizer(ngram_range=(3, 5), sublinear_tf=True, analyzer="char_wb")),
         ])
 
-        # Linear SVM com calibração de probabilidades para retornar confiança real
         clf = CalibratedClassifierCV(
             estimator=LinearSVC(C=1.0, class_weight="balanced", random_state=42),
             cv=3
@@ -436,7 +459,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Microsserviço de Categorização Inteligente de Produtos",
     description="Classifica nomes de produtos extraídos de faturas/notas fiscais usando abordagem híbrida de alta performance: Regras Fiscais + Linear SVM com TF-IDF.",
-    version="3.0.0",
+    version="3.1.0",
     lifespan=lifespan
 )
 
