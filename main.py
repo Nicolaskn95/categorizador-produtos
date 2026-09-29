@@ -32,6 +32,25 @@ PADRAO_EMBALAGEM = (
 )
 
 ABREVIACOES_FISCAIS: Dict[str, str] = {
+    r"\bagua sanit\w*\b": "agua sanitaria",
+    r"\bag sanit\w*\b": "agua sanitaria",
+    r"\bagua san\b": "agua sanitaria",
+    r"\bpo gel\b": "gelatina",
+    r"\bpo gelat\w*\b": "gelatina",
+    r"\bfil pap\b": "filtro de papel",
+    r"\bfiltro papel\b": "filtro de papel",
+    r"\bfiltro cafe\b": "filtro de papel",
+    r"\bnect\b": "suco nectar",
+    r"\besp s brite\b": "esponja scotch brite",
+    r"\besp\b": "esponja",
+    r"\bs brite\b": "scotch brite",
+    r"\bqjo\b": "queijo",
+    r"\bmussarel\b": "mussarela",
+    r"\bmol soja\b": "molho soja",
+    r"\bmol\b": "molho",
+    r"\bcr leite\b": "creme de leite",
+    r"\bleite cond\b": "leite condensado",
+    r"\bguar scott\b": "guardanapo scott",
     r"\blav r\b": "lava roupas",
     r"\btixan mac\b": "tixan maciez",
     r"\btixan\b": "lava roupas tixan",
@@ -41,8 +60,10 @@ ABREVIACOES_FISCAIS: Dict[str, str] = {
     r"\bsard\b": "sardinha",
     r"\bcer\b": "cereal",
     r"\bmaion\b": "maionese",
+    r"\bling c\b": "linguica calabresa",
     r"\bling\b": "linguica",
     r"\bdes\b": "desinfetante",
+    r"\bdet l\b": "detergente liquido",
     r"\bdet\b": "detergente",
     r"\brefri\b": "refrigerante",
     r"\brefr\b": "refrigerante",
@@ -84,42 +105,49 @@ def limpar_nome_fiscal(nome: str) -> str:
 # ---------------------------------------------------------------------------
 # Regras Determinísticas de Altíssima Precisão (Expressões Regulares)
 # Prioridade:
-# 1. BEBIDAS antes de FRUTAS (evita que suco/energético de uva caia em frutas)
-# 2. LIMPEZA antes de MERCEARIA (evita que sabão/tixan maciez vire macarrão)
-# 3. MERCEARIA_SECA antes de ACOUGUE (evita que caldo sazon de carne caia em açougue)
+# 1. LIMPEZA antes de BEBIDAS (evita que água sanitária/alvejante caia em bebidas)
+# 2. PADARIA_E_CONFEITARIA antes de LATICINIOS e FRUTAS (biscoito de nata cai em padaria)
+# 3. MERCEARIA_SECA antes de FRUTAS (gelatina de uva/limão cai em mercearia)
+# 4. BEBIDAS antes de FRUTAS (evita que suco/energético/néctar de uva caia em frutas)
+# 5. UTILIDADES_DOMESTICAS (filtro de papel, fósforos, etc)
+# 6. MERCEARIA_SECA antes de ACOUGUE (evita que caldo sazon de carne caia em açougue)
 # ---------------------------------------------------------------------------
 REGRAS_REGEX: Dict[str, str] = {
-    "BEBIDAS": (
-        r"\b(refrigerante|refr\b|refri\b|ref\b|schweppes|coca|coca-cola|pepsi|guarana|fanta|"
-        r"suco|cerveja|chopp|vinho|vodka|whisky|gin|energetico|energ\b|baly|red bull|monster|"
-        r"agua|tonica|cha|ice|gatorade|h2oh)\b"
-    ),
     "LIMPEZA": (
         r"\b(detergente|det\b|desinfetante|des\b|des lysoform|lysoform|sabao em po|sabao barra|"
-        r"amaciante|agua sanitaria|alvejante|cloro|esponja|bombril|ype|veja|limpador|desengordurante|"
+        r"amaciante|agua sanitaria|alvejante|cloro|esponja|scotch brite|bombril|ype|veja|limpador|desengordurante|"
         r"multiuso|vassoura|rodo|saco lixo|lustra|lixivia|inseticida|guardanapo|guard\b|"
         r"papel toalha|toalha papel|lava roupas|lav r\b|omo|tixan|ariel|comfort|downy|brilhante)\b"
+    ),
+    "PADARIA_E_CONFEITARIA": (
+        r"\b(pao|biscoito|bisc\b|bolacha|rosquinha|rosq\b|bolo|torta|croissant|baguete|salgado|coxinha|empada|"
+        r"pastel|torrada|panetone|confeitaria|padaria)\b"
     ),
     "MERCEARIA_SECA": (
         r"\b(arroz|feijao|macarrao|mac\b|massa|espaguete|penne|oleo|azeite|farinha|biju|polvilho|fuba|"
         r"acucar|cafe|sal|molho|extrato|enlatado|milho|ervilha|sardinha|sard\b|atum|lentilha|grao de bico|"
         r"vinagre|mol tom|ext tom|bat pa\b|batata palha|yoki|salsaretti|conserva|maionese|maion\b|"
         r"ketchup|canjica|sucrilhos|cereal|cer\b|caldo|sazon|knorr|maggi|sabor ami|curry|tempero|temp\b|"
-        r"siamar|kitano|colorau|cominho|oregano|chocolate|choc\b|ch\b|garoto|lacta|nestle tal|barra chocolate|bombom)\b"
+        r"siamar|kitano|colorau|cominho|oregano|chocolate|choc\b|ch\b|garoto|lacta|nestle tal|barra chocolate|bombom|"
+        r"gelatina|po gel\b|ervas finas)\b"
+    ),
+    "BEBIDAS": (
+        r"\b(refrigerante|refr\b|refri\b|ref\b|schweppes|coca|coca-cola|pepsi|guarana|fanta|"
+        r"suco|nectar|cerveja|chopp|vinho|vodka|whisky|gin|energetico|energ\b|baly|red bull|monster|"
+        r"tonica|cha|ice|gatorade|h2oh|agua(?! sanitaria))\b"
+    ),
+    "UTILIDADES_DOMESTICAS": (
+        r"\b(lampada|pilha|panela|copo|prato|talher|bateria|utensilio|bazar|filtro de papel|filtro papel|filtro cafe)\b"
     ),
     "ACOUGUE_E_PEIXARIA": (
         r"\b(picanha|alcatra|contra|maminha|costela|frango|coxa|sobrecoxa|peito de frango|"
         r"carne|bov|suin|peixe|salmao|tilapia|camarao|linguica|ling\b|salsicha|bife|acougue|bacon|"
-        r"pernil|mignon|patinho|acem|musculo|cupim|bovino|suino|pescado|bacalhau|toscana|calabresa|"
+        r"pernil|mignon|patinho|acem|musculo|cupim|bovin\w*|suin\w*|paleta|pescado|bacalhau|toscana|calabresa|"
         r"miolo acem|file de frango|charque|carne seca)\b"
     ),
     "LATICINIOS_E_OVOS": (
         r"\b(leite|queijo|mussarela|mucarela|parmesao|iogurte|requeijao|req\b|manteiga|margarina|"
-        r"ovo|ovos|nata|creme de leite|coalhada|ricota|gorgonzola|provolone|catupiry)\b"
-    ),
-    "PADARIA_E_CONFEITARIA": (
-        r"\b(pao|biscoito|bisc\b|bolacha|bolo|torta|croissant|baguete|salgado|coxinha|empada|"
-        r"pastel|torrada|panetone|confeitaria|padaria)\b"
+        r"ovo|ovos|nata|creme de leite|leite condensado|coalhada|ricota|gorgonzola|provolone|catupiry)\b"
     ),
     "CONGELADOS": (
         r"\b(congelad|cong\b|sorvete|pizza|lasanha|nugget|hamburguer|steak|batata cong|"
@@ -133,9 +161,6 @@ REGRAS_REGEX: Dict[str, str] = {
     "PET_SHOP": (
         r"\b(racao|petisco|pet\b|pedigree|whiskas|golden|premier|areia gato|coleira|"
         r"cachorro|caes|canino|felino)\b"
-    ),
-    "UTILIDADES_DOMESTICAS": (
-        r"\b(lampada|pilha|panela|copo|prato|talher|bateria|utensilio|bazar|filtro cafe)\b"
     ),
     "HORTIFRUTI_FRUTAS": (
         r"\b(maca|banana|laranja|uva|morango|abacaxi|melancia|melao|mamao|limao|pera|"
