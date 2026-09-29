@@ -1,13 +1,17 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 import logging
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.pipeline import Pipeline, FeatureUnion
 
 # ---------------------------------------------------------------------------
 # Configuração de Logging
@@ -19,59 +23,100 @@ logging.basicConfig(
 logger = logging.getLogger("categorizador-produtos")
 
 # ---------------------------------------------------------------------------
-# Configurações do Ambiente e Constantes
+# Dicionário de Normalização e Expansão de Abreviações Fiscais (SEFAZ / NFC-e)
 # ---------------------------------------------------------------------------
-MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+ABREVIACOES_FISCAIS: Dict[str, str] = {
+    r"\bmac\b": "macarrao",
+    r"\bguard\b": "guardanapo",
+    r"\babob\b": "abobrinha",
+    r"\breq\b": "requeijao",
+    r"\blav r\b": "lava roupas",
+    r"\bsard\b": "sardinha",
+    r"\bcer\b": "cereal",
+    r"\bmaion\b": "maionese",
+    r"\bling\b": "linguica",
+    r"\bdes\b": "desinfetante",
+    r"\bdet\b": "detergente",
+    r"\brefri\b": "refrigerante",
+    r"\bsab l\b": "sabonete liquido",
+    r"\bsab\b": "sabonete",
+    r"\bchoc\b": "chocolate",
+    r"\bbisc\b": "biscoito",
+    r"\bacem\b": "carne acem",
+    r"\bmusculo\b": "carne musculo",
+    r"\bcost\b": "costela",
+    r"\balcat\b": "alcatra",
+    r"\bpican\b": "picanha",
+}
 
 def limpar_nome_fiscal(nome: str) -> str:
     """
-    Remove prefixos fiscais de quantidade e tipo de embalagem comumente
-    impressos em faturas/NFC-e, tais como:
-    '1 MA - ', '0.686 KG - ', '1 FR - ', '1 SH - ', '1 TP - ', '1 PC - '
+    Higieniza a descrição do produto de cupom fiscal:
+    1. Remove prefixo fiscal de quantidade/embalagem ('1 MA - ', '0.34 KG - ', '1 PE - ', '1 PO - ')
+    2. Remove unidades soltas e medidas tipo '23X22', '500ML', '2L', '1KG'
+    3. Normaliza pontuações e expande abreviações fiscais conhecidas
     """
-    limpo = re.sub(
-        r"^\s*\d+([.,]\d+)?\s*(MA|SH|TP|FR|PC|KG|UN|LT|CX|PT|GL|FD|BJ|LATA|BARRA|M|G|GR)\s*[-–]\s*",
+    # 1. Remove prefixo de quantidade e unidade fiscal
+    texto = re.sub(
+        r"^\s*\d+([.,]\d+)?\s*(MA|SH|TP|FR|PC|KG|UN|LT|CX|PT|GL|FD|BJ|PE|PO|BD|DZ|SC|TB|BL|LATA|BARRA|M|G|GR)\s*[-–—/]\s*",
         "",
         nome,
         flags=re.IGNORECASE
     )
-    return limpo.strip()
+    # 2. Remove medidas soltas tipo '23X22', '500ML', '2L', '1KG'
+    texto = re.sub(r"\b\d+([.,]\d+)?(kg|g|gr|l|ml|un|pc|m|cm|mm|x\d+)\b", " ", texto, flags=re.IGNORECASE)
+    texto = re.sub(r"\b\d+x\d+\b", " ", texto, flags=re.IGNORECASE)
+    # 3. Remove barras e traços substituindo por espaço
+    texto = re.sub(r"[/\\_\-]", " ", texto)
+    texto = texto.lower().strip()
 
-# Padrões determinísticos de alta precisão para itens comuns de supermercado / faturas
+    # 4. Expansão de abreviações fiscais
+    for padrao, expansao in ABREVIACOES_FISCAIS.items():
+        texto = re.sub(padrao, expansao, texto)
+
+    return re.sub(r"\s+", " ", texto).strip()
+
+# ---------------------------------------------------------------------------
+# Regras Determinísticas de Altíssima Precisão (Expressões Regulares)
+# Prioridade: Categorias específicas com termos compostos (ex: massas com ovos) antes de laticínios
+# ---------------------------------------------------------------------------
 REGRAS_REGEX: Dict[str, str] = {
     "ACOUGUE_E_PEIXARIA": (
         r"\b(picanha|alcatra|contra|maminha|costela|frango|coxa|sobrecoxa|peito de frango|"
         r"carne|bov|suin|peixe|salmao|tilapia|camarao|linguica|ling\b|salsicha|bife|acougue|bacon|"
-        r"pernil|mignon|patinho|acem|cupim|bovino|suino|pescado|bacalhau|toscana|calabresa)\b"
-    ),
-    "LATICINIOS_E_OVOS": (
-        r"\b(leite|queijo|mussarela|mucarela|parmesao|iogurte|requeijao|manteiga|margarina|"
-        r"ovo|ovos|nata|creme de leite|coalhada|ricota|gorgonzola|provolone)\b"
-    ),
-    "PADARIA_E_CONFEITARIA": (
-        r"\b(pao|biscoito|bolacha|bolo|torta|croissant|baguete|salgado|coxinha|empada|"
-        r"pastel|torrada|panetone|confeitaria|padaria)\b"
+        r"pernil|mignon|patinho|acem|musculo|cupim|bovino|suino|pescado|bacalhau|toscana|calabresa|"
+        r"miolo acem|file de frango|charque|carne seca)\b"
     ),
     "MERCEARIA_SECA": (
-        r"\b(arroz|feijao|macarrao|massa|espaguete|oleo|azeite|farinha|acucar|cafe|sal|"
-        r"molho|extrato|enlatado|milho|ervilha|sardinha|atum|lentilha|grao de bico|"
-        r"vinagre|mol tom|ext tom|bat pa\b|batata palha|yoki|salsaretti|conserva|maionese|ketchup)\b"
+        r"\b(arroz|feijao|macarrao|mac\b|massa|espaguete|penne|oleo|azeite|farinha|acucar|cafe|sal|"
+        r"molho|extrato|enlatado|milho|ervilha|sardinha|sard\b|atum|lentilha|grao de bico|"
+        r"vinagre|mol tom|ext tom|bat pa\b|batata palha|yoki|salsaretti|conserva|maionese|maion\b|"
+        r"ketchup|canjica|sucrilhos|cereal|cer\b)\b"
+    ),
+    "LIMPEZA": (
+        r"\b(detergente|det\b|desinfetante|des\b|des lysoform|lysoform|sabao em po|sabao barra|"
+        r"amaciante|agua sanitaria|alvejante|cloro|esponja|bombril|ype|veja|limpador|desengordurante|"
+        r"multiuso|vassoura|rodo|saco lixo|lustra|lixivia|inseticida|guardanapo|guard\b|"
+        r"papel toalha|toalha papel|lava roupas|lav r\b|omo)\b"
+    ),
+    "LATICINIOS_E_OVOS": (
+        r"\b(leite|queijo|mussarela|mucarela|parmesao|iogurte|requeijao|req\b|manteiga|margarina|"
+        r"ovo|ovos|nata|creme de leite|coalhada|ricota|gorgonzola|provolone|catupiry)\b"
+    ),
+    "PADARIA_E_CONFEITARIA": (
+        r"\b(pao|biscoito|bisc\b|bolacha|bolo|torta|croissant|baguete|salgado|coxinha|empada|"
+        r"pastel|torrada|panetone|confeitaria|padaria)\b"
     ),
     "CONGELADOS": (
         r"\b(congelad|cong\b|sorvete|pizza|lasanha|nugget|hamburguer|steak|batata cong|"
         r"polpa de fruta|acai|gelo)\b"
     ),
     "BEBIDAS": (
-        r"\b(refrigerante|refr\b|coca|coca-cola|pepsi|guarana|fanta|suco|cerveja|chopp|"
+        r"\b(refrigerante|refr\b|refri\b|coca|coca-cola|pepsi|guarana|fanta|suco|cerveja|chopp|"
         r"vinho|vodka|whisky|gin|energetico|red bull|monster|agua|tonica|cha|ice)\b"
     ),
-    "LIMPEZA": (
-        r"\b(detergente|desinfetante|des lysoform|lysoform|sabao em po|sabao barra|amaciante|agua sanitaria|"
-        r"alvejante|cloro|esponja|bombril|ype|veja|limpador|desengordurante|multiuso|"
-        r"vassoura|rodo|saco lixo|lustra|lixivia|inseticida)\b"
-    ),
     "HIGIENE_E_BELEZA": (
-        r"\b(shampoo|shamp\b|condicionador|cond\b|sabonete|sab l\b|sab emb\b|creme dental|"
+        r"\b(shampoo|shamp\b|condicionador|cond\b|sabonete|sab l\b|sab emb\b|sab\b|creme dental|"
         r"pasta dente|escova dente|desodorante|desod\b|absorvente|cotonete|hidratante|"
         r"perfume|fio dental|papel higienico|fralda|protetor solar|esmalt)\b"
     ),
@@ -80,54 +125,274 @@ REGRAS_REGEX: Dict[str, str] = {
         r"cachorro|caes|canino|felino)\b"
     ),
     "UTILIDADES_DOMESTICAS": (
-        r"\b(lampada|pilha|panela|copo|prato|talher|guardanapo|papel toalha|bateria|"
-        r"utensilio|bazar|filtro cafe)\b"
+        r"\b(lampada|pilha|panela|copo|prato|talher|bateria|utensilio|bazar|filtro cafe)\b"
     ),
     "HORTIFRUTI_FRUTAS": (
         r"\b(maca|banana|laranja|uva|morango|abacaxi|melancia|melao|mamao|limao|pera|"
         r"manga|maracuja|kiwi|pessego|goiaba|tangerina|mexerica)\b"
     ),
     "HORTIFRUTI_VERDURAS_E_LEGUMES": (
-        r"\b(alface|tomate|cebola|cebolinha|batata|cenoura|alho|pimentao|chuchu|abobrinha|couve|"
+        r"\b(alface|tomate|cebola|cebolinha|batata|cenoura|alho|pimentao|chuchu|abobrinha|abob\b|couve|"
         r"brocolis|espinafre|repolho|mandioca|aipim|rucula|cheiro verde|hortalica|"
-        r"coentro|agriao|salsa|salsinha|manjericao|hortela|alecrim|acelga|escarola|chicoria|hidroponic\w*)\b"
+        r"coentro|agriao|salsa|salsinha|manjericao|hortela|alecrim|acelga|escarola|chicoria|"
+        r"beterraba|vagem|hidroponic\w*)\b"
     )
 }
 
-CATEGORIAS_DESCRICAO: Dict[str, str] = {
-    "ACOUGUE_E_PEIXARIA": "carnes bovinas, aves, frango, suino, linguiças, peixes e frutos do mar de acougue",
-    "LATICINIOS_E_OVOS": "laticinios, leite, queijos, iogurtes, manteiga e ovos",
-    "PADARIA_E_CONFEITARIA": "padaria e confeitaria, paes, bolos, tortas, biscoitos e salgados",
-    "MERCEARIA_SECA": "mercearia seca, graos, arroz, feijao, massas, molhos, vinagre, cafe e acucar",
-    "CONGELADOS": "alimentos congelados, sorvetes, refeicoes prontas, pizzas e lasanhas congeladas",
-    "BEBIDAS": "bebidas, refrigerantes, sucos, cervejas, vinhos, destilados e agua mineral",
-    "LIMPEZA": "produtos de limpeza domestica, detergentes, desinfetantes, sabao, lysoform e amaciante",
-    "HIGIENE_E_BELEZA": "higiene pessoal e cosméticos, sabonetes, shampoos, desodorantes e cremes",
-    "PET_SHOP": "produtos para animais e pet shop, racao e petiscos para caes e gatos",
-    "UTILIDADES_DOMESTICAS": "utilidades domesticas e bazar, utensilios de cozinha, copos, pratos e lampadas",
-    "HORTIFRUTI_FRUTAS": "frutas frescas de hortifruti",
-    "HORTIFRUTI_VERDURAS_E_LEGUMES": "verduras, legumes, hortalicas frescas, folhas, ervas, coentro, agriao e temperos de hortifruti"
-}
+# ---------------------------------------------------------------------------
+# Base de Conhecimento / Treinamento Especializada para Supermercados (SVM)
+# ---------------------------------------------------------------------------
+CORPUS_SUPERMERCADO: List[Tuple[str, str]] = [
+    # ACOUGUE_E_PEIXARIA
+    ("picanha bovina", "ACOUGUE_E_PEIXARIA"),
+    ("alcatra bovina corte", "ACOUGUE_E_PEIXARIA"),
+    ("contra file bovino", "ACOUGUE_E_PEIXARIA"),
+    ("maminha bovina", "ACOUGUE_E_PEIXARIA"),
+    ("costela bovina ripa", "ACOUGUE_E_PEIXARIA"),
+    ("file de frango congelado", "ACOUGUE_E_PEIXARIA"),
+    ("coxa e sobrecoxa frango", "ACOUGUE_E_PEIXARIA"),
+    ("peito de frango", "ACOUGUE_E_PEIXARIA"),
+    ("file de frango", "ACOUGUE_E_PEIXARIA"),
+    ("miolo acem bovino", "ACOUGUE_E_PEIXARIA"),
+    ("acem bovino", "ACOUGUE_E_PEIXARIA"),
+    ("musculo bovino", "ACOUGUE_E_PEIXARIA"),
+    ("carne musculo", "ACOUGUE_E_PEIXARIA"),
+    ("musculo carnes", "ACOUGUE_E_PEIXARIA"),
+    ("patinho bovino", "ACOUGUE_E_PEIXARIA"),
+    ("cupim bovino", "ACOUGUE_E_PEIXARIA"),
+    ("linguica toscana sadia", "ACOUGUE_E_PEIXARIA"),
+    ("linguica perdigao na brasa", "ACOUGUE_E_PEIXARIA"),
+    ("ling c sadia gra", "ACOUGUE_E_PEIXARIA"),
+    ("ling t perdigao nabr", "ACOUGUE_E_PEIXARIA"),
+    ("bacon fatiado defumado", "ACOUGUE_E_PEIXARIA"),
+    ("pernil suino", "ACOUGUE_E_PEIXARIA"),
+    ("costela suina", "ACOUGUE_E_PEIXARIA"),
+    ("peixe salmao fresco", "ACOUGUE_E_PEIXARIA"),
+    ("file tilapia", "ACOUGUE_E_PEIXARIA"),
+    ("camarao cinza limpo", "ACOUGUE_E_PEIXARIA"),
+    ("carne moida bovina", "ACOUGUE_E_PEIXARIA"),
+    ("bife de chorizo", "ACOUGUE_E_PEIXARIA"),
+    ("carne seca charque", "ACOUGUE_E_PEIXARIA"),
+
+    # HORTIFRUTI_VERDURAS_E_LEGUMES
+    ("couve manteiga", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("couve fresca", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("cenoura fresca", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("brocolis ninja", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("brocolis japones", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("brocolis japon ninja", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("tomate italiano", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("tomate carmem", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("beterraba fresca", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("beterraba", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("alface americana fechada", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("alface crespa hidroponica", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("vagem macarrao", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("vagem holandesa", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("vagem", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("hortela fresca", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("pimentao verde", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("batata inglesa", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("batata doce", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("abobrinha italia", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("abob italia", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("abobrinha menina", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("cebola branca", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("alho roxo", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("chuchu", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("espinafre", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("repolho verde", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("rucula hidroponica", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("coentro fresco", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("salsinha e cebolinha cheiro verde", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+    ("mandioca aipim", "HORTIFRUTI_VERDURAS_E_LEGUMES"),
+
+    # HORTIFRUTI_FRUTAS
+    ("maca fuji", "HORTIFRUTI_FRUTAS"),
+    ("maca gala", "HORTIFRUTI_FRUTAS"),
+    ("mamao formosa", "HORTIFRUTI_FRUTAS"),
+    ("mamao papaya", "HORTIFRUTI_FRUTAS"),
+    ("laranja pera", "HORTIFRUTI_FRUTAS"),
+    ("laranja bahia", "HORTIFRUTI_FRUTAS"),
+    ("goiaba vermelha", "HORTIFRUTI_FRUTAS"),
+    ("banana prata", "HORTIFRUTI_FRUTAS"),
+    ("banana nanica", "HORTIFRUTI_FRUTAS"),
+    ("abacaxi perola", "HORTIFRUTI_FRUTAS"),
+    ("melancia fatiada", "HORTIFRUTI_FRUTAS"),
+    ("melao amarelo", "HORTIFRUTI_FRUTAS"),
+    ("morango bandeja", "HORTIFRUTI_FRUTAS"),
+    ("uva thompson", "HORTIFRUTI_FRUTAS"),
+    ("limao taiti", "HORTIFRUTI_FRUTAS"),
+    ("pera williams", "HORTIFRUTI_FRUTAS"),
+    ("manga tommy", "HORTIFRUTI_FRUTAS"),
+    ("maracuja azedo", "HORTIFRUTI_FRUTAS"),
+
+    # LATICINIOS_E_OVOS
+    ("leite longa vida italac integral", "LATICINIOS_E_OVOS"),
+    ("leite integral piracanjuba", "LATICINIOS_E_OVOS"),
+    ("leite desnatado", "LATICINIOS_E_OVOS"),
+    ("ovo branco cartela preti", "LATICINIOS_E_OVOS"),
+    ("ovo e bco preti", "LATICINIOS_E_OVOS"),
+    ("ovos vermelhos", "LATICINIOS_E_OVOS"),
+    ("requeijao cremoso pocos de caldas", "LATICINIOS_E_OVOS"),
+    ("req pocos calda", "LATICINIOS_E_OVOS"),
+    ("requeijao catupiry", "LATICINIOS_E_OVOS"),
+    ("queijo mussarela fatiado", "LATICINIOS_E_OVOS"),
+    ("queijo prato fatiado", "LATICINIOS_E_OVOS"),
+    ("queijo parmesao ralado", "LATICINIOS_E_OVOS"),
+    ("manteiga com sal aviacao", "LATICINIOS_E_OVOS"),
+    ("margarina qualy", "LATICINIOS_E_OVOS"),
+    ("iogurte morango danone", "LATICINIOS_E_OVOS"),
+    ("creme de leite nestle", "LATICINIOS_E_OVOS"),
+    ("leite condensado moca", "LATICINIOS_E_OVOS"),
+
+    # LIMPEZA
+    ("guardanapo de papel fani", "LIMPEZA"),
+    ("guard fani", "LIMPEZA"),
+    ("guardanapo fani", "LIMPEZA"),
+    ("guardanapo folha dupla", "LIMPEZA"),
+    ("toalha papel fani", "LIMPEZA"),
+    ("papel toalha kitchen", "LIMPEZA"),
+    ("lava roupas omo delic coco", "LIMPEZA"),
+    ("lav r omo delic coco", "LIMPEZA"),
+    ("sabao liquido omo", "LIMPEZA"),
+    ("sabao em po ariel", "LIMPEZA"),
+    ("amaciante confort concentrado", "LIMPEZA"),
+    ("amaciante downy", "LIMPEZA"),
+    ("detergente ype maca", "LIMPEZA"),
+    ("detergente limpol", "LIMPEZA"),
+    ("desinfetante lysoform suave", "LIMPEZA"),
+    ("des lysoform", "LIMPEZA"),
+    ("desinfetante pinho sol", "LIMPEZA"),
+    ("agua sanitaria ype", "LIMPEZA"),
+    ("alvejante vanish", "LIMPEZA"),
+    ("limpador veja multiuso", "LIMPEZA"),
+    ("esponja dupla face bombril", "LIMPEZA"),
+    ("palha de aco bombril", "LIMPEZA"),
+    ("saco de lixo reforçado", "LIMPEZA"),
+
+    # MERCEARIA_SECA
+    ("canjica cr yoki", "MERCEARIA_SECA"),
+    ("canjica amarela yoki", "MERCEARIA_SECA"),
+    ("maionese heinz tradicional", "MERCEARIA_SECA"),
+    ("maion heinz tradicio", "MERCEARIA_SECA"),
+    ("macarrao barilla ovos penne", "MERCEARIA_SECA"),
+    ("mac barilla ovos pen", "MERCEARIA_SECA"),
+    ("mac divella capel", "MERCEARIA_SECA"),
+    ("macarrao divella capellini", "MERCEARIA_SECA"),
+    ("macarrao espaguete dona benta", "MERCEARIA_SECA"),
+    ("sardinha coqueiro em oleo", "MERCEARIA_SECA"),
+    ("sard coqueiro oleo", "MERCEARIA_SECA"),
+    ("atum solido gomes da costa", "MERCEARIA_SECA"),
+    ("cereal sucrilhos kelloggs", "MERCEARIA_SECA"),
+    ("cer sucrilhos", "MERCEARIA_SECA"),
+    ("cereal matinal", "MERCEARIA_SECA"),
+    ("arroz branco camil tipo 1", "MERCEARIA_SECA"),
+    ("arroz tio joao", "MERCEARIA_SECA"),
+    ("feijao carioca camil", "MERCEARIA_SECA"),
+    ("oleo de soja liza", "MERCEARIA_SECA"),
+    ("azeite de oliva andorinha", "MERCEARIA_SECA"),
+    ("farinha de trigo dona benta", "MERCEARIA_SECA"),
+    ("acucar refinado uniao", "MERCEARIA_SECA"),
+    ("cafe torrado e moido pilao", "MERCEARIA_SECA"),
+    ("molho de tomate salsaretti", "MERCEARIA_SECA"),
+    ("extrato de tomate elefante", "MERCEARIA_SECA"),
+    ("vinagre de alcool castelo", "MERCEARIA_SECA"),
+    ("sal refinado cisne", "MERCEARIA_SECA"),
+
+    # BEBIDAS
+    ("suco campo largo pessego", "BEBIDAS"),
+    ("suco campo largo uva integral", "BEBIDAS"),
+    ("refrigerante coca cola zero", "BEBIDAS"),
+    ("refrigerante guaraná antarctica", "BEBIDAS"),
+    ("cerveja heineken lata", "BEBIDAS"),
+    ("cerveja amstel", "BEBIDAS"),
+    ("vinho tinto chileno", "BEBIDAS"),
+    ("agua mineral sem gas", "BEBIDAS"),
+    ("energetico red bull", "BEBIDAS"),
+
+    # HIGIENE_E_BELEZA
+    ("shampoo loreal elseve", "HIGIENE_E_BELEZA"),
+    ("condicionador pantene", "HIGIENE_E_BELEZA"),
+    ("sabonete liquido monange detox", "HIGIENE_E_BELEZA"),
+    ("sab l monange detox", "HIGIENE_E_BELEZA"),
+    ("sabonete dove original", "HIGIENE_E_BELEZA"),
+    ("creme dental colgate total 12", "HIGIENE_E_BELEZA"),
+    ("desodorante rexona aerosol", "HIGIENE_E_BELEZA"),
+    ("papel higienico neve folha dupla", "HIGIENE_E_BELEZA"),
+    ("absorvente sempre livre", "HIGIENE_E_BELEZA"),
+    ("fralda pampers confort sec", "HIGIENE_E_BELEZA"),
+
+    # PET_SHOP
+    ("racao premier caes adultos", "PET_SHOP"),
+    ("racao golden filhotes", "PET_SHOP"),
+    ("racao whiskas gatos castrados", "PET_SHOP"),
+    ("petisco pedigree dentastix", "PET_SHOP"),
+    ("areia sanitaria para gatos", "PET_SHOP"),
+    ("coleira antipulgas seresto", "PET_SHOP"),
+
+    # PADARIA_E_CONFEITARIA
+    ("pao frances quentinho", "PADARIA_E_CONFEITARIA"),
+    ("pao de forma wickbold", "PADARIA_E_CONFEITARIA"),
+    ("bolo de cenoura com chocolate", "PADARIA_E_CONFEITARIA"),
+    ("torta de frango com catupiry", "PADARIA_E_CONFEITARIA"),
+    ("biscoito recheado passatempo", "PADARIA_E_CONFEITARIA"),
+    ("torrada bauducco tradicional", "PADARIA_E_CONFEITARIA"),
+    ("panetone bauducco frutas", "PADARIA_E_CONFEITARIA"),
+
+    # CONGELADOS
+    ("pizza congelada sadia calabresa", "CONGELADOS"),
+    ("lasanha congelada perdigao quatro queijos", "CONGELADOS"),
+    ("nuggets sadia crocante", "CONGELADOS"),
+    ("hamburguer friboi congelado", "CONGELADOS"),
+    ("sorvete kibon chicabon", "CONGELADOS"),
+    ("batata congelada mccain corte tradicional", "CONGELADOS"),
+    ("polpa de acai congelada", "CONGELADOS"),
+
+    # UTILIDADES_DOMESTICAS
+    ("lampada led philips 9w", "UTILIDADES_DOMESTICAS"),
+    ("pilha alcalina duracell aa", "UTILIDADES_DOMESTICAS"),
+    ("panela de pressao tramontina", "UTILIDADES_DOMESTICAS"),
+    ("copo de vidro nadir figueiredo", "UTILIDADES_DOMESTICAS"),
+    ("prato fundo duralex", "UTILIDADES_DOMESTICAS"),
+    ("filtro de papel para cafe melitta", "UTILIDADES_DOMESTICAS"),
+]
 
 # ---------------------------------------------------------------------------
-# Serviço de Classificação Híbrido (Regras + IA Semântica)
+# Serviço de Classificação Inteligente (Linear SVM + TF-IDF)
 # ---------------------------------------------------------------------------
 class ModelService:
     def __init__(self):
-        self.model: Optional[SentenceTransformer] = None
-        self.category_names: List[str] = list(CATEGORIAS_DESCRICAO.keys())
-        self.category_vectors: Dict[str, np.ndarray] = {}
+        self.model: Optional[Pipeline] = None
+        self.categorias: List[str] = list(REGRAS_REGEX.keys())
 
-    def initialize(self, model_name: str):
-        logger.info(f"Carregando modelo Sentence-Transformer '{model_name}'...")
-        self.model = SentenceTransformer(model_name)
-        logger.info("Modelo Sentence-Transformer carregado com sucesso.")
+    def initialize(self):
+        logger.info("Iniciando treinamento do modelo Linear SVM com TF-IDF (char + word n-grams)...")
+        
+        X_raw = [item[0] for item in CORPUS_SUPERMERCADO]
+        X = [limpar_nome_fiscal(t) for t in X_raw]
+        y = [item[1] for item in CORPUS_SUPERMERCADO]
 
-        logger.info("Indexando vetores semânticos das categorias...")
-        for cat, desc in CATEGORIAS_DESCRICAO.items():
-            vec = self.model.encode(desc, normalize_embeddings=True)
-            self.category_vectors[cat] = np.array(vec, dtype=np.float32)
-        logger.info(f"{len(self.category_names)} categorias semânticas indexadas.")
+        # Extração de características híbrida (palavras inteiras + fragmentos/subpalavras de caracteres)
+        # char_wb (3,5) garante que abreviações fiscais como 'ABOB', 'GUARD', 'MAC' deem match imediato
+        vectorizer = FeatureUnion([
+            ("word", TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, analyzer="word")),
+            ("char", TfidfVectorizer(ngram_range=(3, 5), sublinear_tf=True, analyzer="char_wb")),
+        ])
+
+        # Linear SVM com calibração de probabilidades para retornar confiança real
+        clf = CalibratedClassifierCV(
+            estimator=LinearSVC(C=1.0, class_weight="balanced", random_state=42),
+            cv=3
+        )
+
+        self.model = Pipeline([
+            ("tfidf", vectorizer),
+            ("clf", clf)
+        ])
+
+        self.model.fit(X, y)
+        logger.info(f"Modelo Linear SVM treinado com sucesso! {len(X)} amostras base indexadas.")
 
     def classify(self, text: str) -> Dict[str, any]:
         raw = text.strip()
@@ -135,31 +400,25 @@ class ModelService:
             return {"categoria": "DESCONHECIDO", "confianca": 0.0}
 
         cleaned = limpar_nome_fiscal(raw)
-        cleaned_lower = cleaned.lower()
 
-        # 1. Regra Determinística por Expressões Regulares (Rápido e 100% Preciso)
+        # 1. Regras Determinísticas por Expressões Regulares (Confiança 0.98)
         for cat, pattern in REGRAS_REGEX.items():
-            if re.search(pattern, cleaned_lower):
+            if re.search(pattern, cleaned):
                 return {
                     "categoria": cat,
-                    "confianca": 0.95
+                    "confianca": 0.98
                 }
 
-        # 2. Fallback Semântico com IA Transformer (para itens não cobertos pelas regras)
-        product_vec = self.model.encode(f"produto de mercado: {cleaned_lower}", normalize_embeddings=True)
-        best_cat = None
-        best_score = -1.0
+        # 2. Classificador Inteligente Linear SVM
+        if self.model:
+            pred = self.model.predict([cleaned])[0]
+            prob = float(np.max(self.model.predict_proba([cleaned])[0]))
+            return {
+                "categoria": pred,
+                "confianca": round(prob, 4)
+            }
 
-        for cat, cat_vec in self.category_vectors.items():
-            score = float(np.dot(cat_vec, product_vec))
-            if score > best_score:
-                best_score = score
-                best_cat = cat
-
-        return {
-            "categoria": best_cat or "MERCEARIA_SECA",
-            "confianca": round(max(best_score, 0.0), 4)
-        }
+        return {"categoria": "MERCEARIA_SECA", "confianca": 0.5}
 
 model_service = ModelService()
 
@@ -168,20 +427,16 @@ model_service = ModelService()
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    model_service.initialize(MODEL_NAME)
+    model_service.initialize()
     yield
-    # Shutdown
-    del model_service.model
-    del model_service.category_vectors
 
 # ---------------------------------------------------------------------------
 # Aplicação FastAPI
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="Microsserviço de Categorização Semântica de Produtos",
-    description="Classifica nomes de produtos extraídos de faturas/notas fiscais usando abordagem híbrida (Regras Regex + Sentence-Transformers).",
-    version="2.2.0",
+    title="Microsserviço de Categorização Inteligente de Produtos",
+    description="Classifica nomes de produtos extraídos de faturas/notas fiscais usando abordagem híbrida de alta performance: Regras Fiscais + Linear SVM com TF-IDF.",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -204,8 +459,8 @@ def health_check():
     is_ready = model_service.model is not None
     return {
         "status": "ready" if is_ready else "loading",
-        "modelo": MODEL_NAME,
-        "categorias_disponiveis": len(model_service.category_names)
+        "modelo": "LinearSVM + TF-IDF (char_wb + word n-grams)",
+        "categorias_disponiveis": len(model_service.categorias)
     }
 
 @app.post(
